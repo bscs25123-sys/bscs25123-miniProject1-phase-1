@@ -26,5 +26,6 @@
     <None Include="source.bin">
       <Filter>Resource Files</Filter>
     </None>
+    <None Include="Readme.md" />
   </ItemGroup>
 </Project>
