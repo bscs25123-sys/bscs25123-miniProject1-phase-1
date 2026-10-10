@@ -110,16 +110,33 @@ public:
     // Implement these functions
     Timeline()
     {
+        head = nullptr;
+        tail = nullptr;
+        stepCount = 0;
     }
     void record(Snapshot* s)
     {
-        // add record in the timeline
+        TimelineNode *k=new TimelineNode;
+        k->data = s;
+        k->next = nullptr;
+        k->prev = nullptr;
+        if (head==nullptr) {
+            head = tail = k;
+        }
+        else {
+            tail->next = k;
+             k->prev = tail;
+            tail = k;
+        }
+
     }
     TimelineNode* begin()
     {
+        return head;
     }
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
@@ -254,11 +271,39 @@ bool validateProgram(const char* sourcePath)
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
+    if (!f) {
+        return -1;
+    }
+    int64_t pos= ftell(f);
+    int64_t y = text.size();
+    fwrite(&offsetField, 8, 1, f);
+    fwrite(&y, 4, 1, f);
+    fwrite(text.c_str(), 1,y, f);
+    return pos;
     // writes one [offset(8B)][size(4B)][string] record at the current file position
     // returns this record's own starting byte position
 }
 int64_t readResolveRecord(FILE* f, string& outText)
 {
+    if (!f) {
+        return -1;
+    }
+  
+    int64_t g;
+   
+    if (fread(&g, 8, 1, f) != 1) {
+        return -1;
+    }
+    int32_t o;
+
+    if (fread(&o, 4, 1, f)!=1) {
+        return -1;
+    }
+    outText.resize(o);
+    if (fread(&outText[0],  1,o, f) != o) {
+        return -1;
+    }
+    return g;
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
