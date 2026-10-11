@@ -89,8 +89,9 @@ public:
             u = u->next;
             count++;
         }
-    }
+
         return count;
+    }
 };
 
 
@@ -172,10 +173,9 @@ void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
-
-    // placeholder for other two data members
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 }
-
 // resolve.bin - bookkeeping
 struct FuncEntry
 {
@@ -319,67 +319,67 @@ int64_t readResolveRecord(FILE* f, string& outText)
     return g;
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
-    int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
-    {
-        FuncEntry funcArray[MAX_FUNCS];
-        int32_t funcCount = 0;
-        vector<string> l;
-        vector<int64_t> lineoff;
-        ifstream in(sourcePath, ios::binary);
-        if (!in) 
-            return -1;
-        int64_t offset = 0;
-        string line;
-        while (readSourceLine(in, line)) {
-            string kw = firstWord(line);
-            string name = secondWord(line);
-            string rest = restAfterSecond(line);
-            lineoff.push_back(offset);
-            l.push_back(line);
-            if (kw == "func") {
-                if (funcCount >= MAX_FUNCS) 
-                    return -1;
-                funcArray[funcCount].funcName = name;
-                funcArray[funcCount].byteOffsetInResolveBin = offset;
-                funcCount++;
-            }
-            int64_t size = line.size();
-            if (kw == "call")
-                size = 5 + 16 + rest.size();     
-            offset += 8 + 4 + size;
-        }
-        in.close();
-        FILE* out = fopen(resolveBinPath, "wb");
-        if (!out) 
-            return -1;
-        for (int32_t i = 0; i < (int32_t)l.size(); i++) {
-            string kw = firstWord(l[i]);
-            string name = secondWord(l[i]);
-            string rest = restAfterSecond(l[i]);
-            string toWrite = l[i];
-            if (kw == "call") {
-                int64_t tgt = -1;
-                for (int32_t j = 0; j < funcCount; j++) {
-                    if (funcArray[j].funcName == name)
-                        tgt = funcArray[j].byteOffsetInResolveBin;
-                }
-                if (tgt < 0) {
-                    fclose(out);
-                    return -1;
-                }
-                string dig = to_string(tgt);
-                string padd = string(16 - dig.size(), '0') + dig;
-                toWrite = "call " + padd + rest;
-            }
-            writeResolveRecord(out, lineoff[i], toWrite);
-        }
-        fclose(out);
-        for (int32_t j = 0; j < funcCount; j++) {
-            if (funcArray[j].funcName == "main")
-                return funcArray[j].byteOffsetInResolveBin;
-        }
+int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
+{
+    FuncEntry funcArray[MAX_FUNCS];
+    int32_t funcCount = 0;
+    vector<string> l;
+    vector<int64_t> lineoff;
+    ifstream in(sourcePath, ios::binary);
+    if (!in) 
         return -1;
+    int64_t offset = 0;
+    string line;
+    while (readSourceLine(in, line)) {
+        string kw = firstWord(line);
+        string name = secondWord(line);
+        string rest = restAfterSecond(line);
+        lineoff.push_back(offset);
+        l.push_back(line);
+        if (kw == "func") {
+            if (funcCount >= MAX_FUNCS) 
+                return -1;
+            funcArray[funcCount].funcName = name;
+            funcArray[funcCount].byteOffsetInResolveBin = offset;
+            funcCount++;
+        }
+        int64_t size = line.size();
+        if (kw == "call")
+            size = 5 + 16 + rest.size();     
+        offset += 8 + 4 + size;
     }
+    in.close();
+    FILE* out = fopen(resolveBinPath, "wb");
+    if (!out) 
+        return -1;
+    for (int32_t i = 0; i < (int32_t)l.size(); i++) {
+        string kw = firstWord(l[i]);
+        string name = secondWord(l[i]);
+        string rest = restAfterSecond(l[i]);
+        string toWrite = l[i];
+        if (kw == "call") {
+            int64_t tgt = -1;
+            for (int32_t j = 0; j < funcCount; j++) {
+                if (funcArray[j].funcName == name)
+                    tgt = funcArray[j].byteOffsetInResolveBin;
+            }
+            if (tgt < 0) {
+                fclose(out);
+                return -1;
+            }
+            string dig = to_string(tgt);
+            string padd = string(16 - dig.size(), '0') + dig;
+            toWrite = "call " + padd + rest;
+        }
+        writeResolveRecord(out, lineoff[i], toWrite);
+    }
+    fclose(out);
+    for (int32_t j = 0; j < funcCount; j++) {
+        if (funcArray[j].funcName == "main")
+            return funcArray[j].byteOffsetInResolveBin;
+    }
+    return -1;
+}
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
@@ -404,26 +404,197 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
+    int32_t n = 0;
+    int i = 0;
+    int len = line.size();
+    while (i < len && n < maxTokens) {
+        while (i < len && line[i] == ' ') 
+            i++;
+        if (i >= len)
+        { break;
+        }
+        string w = "";
+        while (i < len && line[i] != ' ') 
+            w += line[i++];
+        tokens[n].text = w;
+        tokens[n].type = (n == 0) ? KEYWORD : (n == 1) ? IDENTIFIER : PARAM;
+        n++;
+    }
+    return n;
     // first word is always a instruction keyword
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
     // after identifier all are the params/arg, space separated
 }
+Variable* findVar(Frame& f, const string& nm)
+{
+    for (int i = 0; i < f.argc; i++) {
+        if (f.argv[i].name == nm)
+            return &f.argv[i];
+    }
+    for (int i = 0; i < f.localCount; i++) {
+        if (f.locals[i].name == nm)
+            return &f.locals[i];
+    }
+    return nullptr;
+}
+
+Variable* getVar(Frame& f, const string& nm)
+{
+    Variable* v = findVar(f, nm);
+    if (v != nullptr)
+        return v;
+    if (f.localCount >= MAX_VARS_PER_FRAME)
+        return nullptr;
+    int k = f.localCount;
+    f.locals[k].name = nm;
+    f.locals[k].value = 0;
+    f.localCount++;
+    return &f.locals[k];
+}
+bool isNum(const string& s)
+{
+    if (s.empty())
+        return false;
+    int start = 0;
+    if (s[0] == '-')
+        start = 1;
+    if (start == s.size())
+        return false;
+    for (int i = start; i < s.size(); i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+    }
+    return true;
+}
+int32_t valOf(Frame& f, const string& s)
+{
+    Variable* v = findVar(f, s);
+    if (v != nullptr)
+        return v->value;
+    if (isNum(s))
+        return stoi(s);
+    return 0;
+}
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
+    Snapshot* s = new Snapshot;
+    s->stackDepth = callStack.snapshot_into(s->callStack, MAX_STACK_DEPTH);
+    int32_t d = s->stackDepth;
+    for (int32_t i = 0; i < d / 2; i++) {
+        Frame t = s->callStack[i];
+        s->callStack[i] = s->callStack[d - 1 - i];
+        s->callStack[d - 1 - i] = t;
+    }
+    return s;
     // build the snapshot based on the callStack given
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
+ FILE* f = fopen(resolveBinPath, "rb");
+  if (f == nullptr)
+    return;
+  if (mainOffset < 0) {
+    fclose(f);
+    return;
+}
+ Stack<Frame> st;
+Token tk[MAX_TOKENS];
+Token hd[MAX_TOKENS];
+string s;
+fseek(f, (long)mainOffset, SEEK_SET);
+readResolveRecord(f, s);
+Frame m;
+m.func_name = "main";
+m.argc = 0;
+m.returnLine = -1;
+m.localCount = 0;
+st.push(m);
+while (true) {
+    int64_t cur = readResolveRecord(f, s);
+    if (cur < 0)
+        break;
+    int n = tokenizeLine(s, tk, MAX_TOKENS);
+    if (n == 0)
+        continue;
+    string kw = tk[0].text;
+    Frame& top = st.peek();
+    if (kw == "set" && n >= 3) {
+        Variable* v = getVar(top, tk[1].text);
+        if (v != nullptr)
+            v->value = valOf(top, tk[2].text);
+    }
+    else if (kw == "add" && n >= 3) {
+        Variable* v = getVar(top, tk[1].text);
+        if (v != nullptr)
+            v->value += valOf(top, tk[2].text);
+    }
+    else if (kw == "sub" && n >= 3) {
+        Variable* v = getVar(top, tk[1].text);
+        if (v != nullptr)
+            v->value -= valOf(top, tk[2].text);
+    }
+    else if (kw == "mul" && n >= 3) {
+        Variable* v = getVar(top, tk[1].text);
+        if (v != nullptr)
+            v->value *= valOf(top, tk[2].text);
+    }
+    else if (kw == "div" && n >= 3) {
+        Variable* v = getVar(top, tk[1].text);
+        int y = valOf(top, tk[2].text);
+        if (v != nullptr && y != 0)
+            v->value /= y;
+    }
+    else if (kw == "call" && n >= 2) {
+        if (st.depth() >= MAX_STACK_DEPTH)
+            break;
+        fseek(f, (long)stoll(tk[1].text), SEEK_SET);
+        readResolveRecord(f, s);
+        int hn = tokenizeLine(s, hd, MAX_TOKENS);
+        Frame nf;
+        nf.func_name = hd[1].text;
+        nf.argc = hn - 2;
+        nf.returnLine = (int32_t)cur;
+        nf.localCount = 0;
+        for (int i = 0; i < nf.argc; i++) {
+            nf.argv[i].name = hd[2 + i].text;
+            nf.argv[i].value = 0;
+            if (2 + i < n)
+                nf.argv[i].value = valOf(top, tk[2 + i].text);
+        }
+        st.push(nf);
+    }
+    else if (kw == "func_end") {
+        if (st.depth() == 1) {
+            timeline.record(buildSnapshot(st));
+            break;
+        }
+        Frame done = st.pop();
+        Frame& back = st.peek();
+        fseek(f, done.returnLine, SEEK_SET);
+        readResolveRecord(f, s);
+        n = tokenizeLine(s, tk, MAX_TOKENS);
+        for (int i = 0; i < done.argc; i++) {
+            if (2 + i < n) {
+                Variable* v = findVar(back, tk[2 + i].text);
+                if (v != nullptr)
+                    v->value = done.argv[i].value;
+            }
+        }
+    }
+    timeline.record(buildSnapshot(st));
+}
+fclose(f);
+}
     // initialize the call stack
     // make the main frame
     // push main frame on the call stack
 
     // implementation:
     // execute line by line, and according to the keyword perform action
-}
 
 // PASS 0x3: SERIALIZE TIMELINE
+
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
     // placeholder for header
