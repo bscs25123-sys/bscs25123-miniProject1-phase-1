@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <fstream>
 #include <cstdio>
+#include<vector>
 using namespace std;
 
 // ---- Constants ----
@@ -239,6 +240,18 @@ string secondWord(const string& line)
     }
     return secword;
 }
+string restAfterSecond(const string& line)
+{
+    int j = 0;
+    while (j < (int)line.size() && line[j] != ' ') 
+        j++;  
+    while (j < (int)line.size() && line[j] == ' ') 
+        j++;   
+    while (j < (int)line.size() && line[j] != ' ')
+        j++;  
+    return line.substr(j);                               
+}
+
 bool validateProgram(const char* sourcePath)
 {
     ifstream in(sourcePath, ios::binary);
@@ -306,12 +319,67 @@ int64_t readResolveRecord(FILE* f, string& outText)
     return g;
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
-int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
-{
-    FuncEntry funcArray[MAX_FUNCS];
-    int32_t funcCount = 0;
-    PendingPatch patches[MAX_PATCHES];
-    int32_t patchCount = 0;
+    int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
+    {
+        FuncEntry funcArray[MAX_FUNCS];
+        int32_t funcCount = 0;
+        vector<string> l;
+        vector<int64_t> lineoff;
+        ifstream in(sourcePath, ios::binary);
+        if (!in) 
+            return -1;
+        int64_t offset = 0;
+        string line;
+        while (readSourceLine(in, line)) {
+            string kw = firstWord(line);
+            string name = secondWord(line);
+            string rest = restAfterSecond(line);
+            lineoff.push_back(offset);
+            l.push_back(line);
+            if (kw == "func") {
+                if (funcCount >= MAX_FUNCS) 
+                    return -1;
+                funcArray[funcCount].funcName = name;
+                funcArray[funcCount].byteOffsetInResolveBin = offset;
+                funcCount++;
+            }
+            int64_t size = line.size();
+            if (kw == "call")
+                size = 5 + 16 + rest.size();     
+            offset += 8 + 4 + size;
+        }
+        in.close();
+        FILE* out = fopen(resolveBinPath, "wb");
+        if (!out) 
+            return -1;
+        for (int32_t i = 0; i < (int32_t)l.size(); i++) {
+            string kw = firstWord(l[i]);
+            string name = secondWord(l[i]);
+            string rest = restAfterSecond(l[i]);
+            string toWrite = l[i];
+            if (kw == "call") {
+                int64_t tgt = -1;
+                for (int32_t j = 0; j < funcCount; j++) {
+                    if (funcArray[j].funcName == name)
+                        tgt = funcArray[j].byteOffsetInResolveBin;
+                }
+                if (tgt < 0) {
+                    fclose(out);
+                    return -1;
+                }
+                string dig = to_string(tgt);
+                string padd = string(16 - dig.size(), '0') + dig;
+                toWrite = "call " + padd + rest;
+            }
+            writeResolveRecord(out, lineoff[i], toWrite);
+        }
+        fclose(out);
+        for (int32_t j = 0; j < funcCount; j++) {
+            if (funcArray[j].funcName == "main")
+                return funcArray[j].byteOffsetInResolveBin;
+        }
+        return -1;
+    }
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
@@ -320,7 +388,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     // with its target's position. Patching happens after the full write
     // Returns the byte offset of main's FUNC header record.
     // if there is no main return the error 
-}
+
 
 // PASS 0x2: EXECUTION (tokenization happens here)
 enum TokenType
