@@ -8,7 +8,7 @@
 //   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
 
-
+#define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
 #include <string>
 #include <cstdint>
@@ -50,11 +50,10 @@ public:
     }
     void push(const T& val)
     {
-        Node *n = new Node(val);
-        n->data = val;
-        n->next= top;
+        Node* n = new Node{ val, top };
         top = n;
         count++;
+        
        
     }
     T pop()
@@ -130,7 +129,7 @@ public:
              k->prev = tail;
             tail = k;
         }
-
+        stepCount++;
     }
     TimelineNode* begin()
     {
@@ -230,24 +229,24 @@ string firstWord(const string& line)
 }
 string secondWord(const string& line)
 {
-    string fst = firstWord(line);
-    while(fst=="func") {
-        continue;
-    }
-    string secword = " ";
-    for(int i=0;i<line.size() and line[i]!='\0';i++){
-        secword += line[i];
-    }
-    return secword;
+    int j = 0;
+    while (j <line.size() && line[j] != ' ')
+        j++;
+    while (j < line.size() && line[j] == ' ')
+        j++;
+    string w = "";
+    while (j <line.size() && line[j] != ' ')
+        w += line[j++];
+    return w;
 }
 string restAfterSecond(const string& line)
 {
     int j = 0;
-    while (j < (int)line.size() && line[j] != ' ') 
+    while (j <line.size() && line[j] != ' ') 
         j++;  
-    while (j < (int)line.size() && line[j] == ' ') 
+    while (j < line.size() && line[j] == ' ') 
         j++;   
-    while (j < (int)line.size() && line[j] != ' ')
+    while (j < line.size() && line[j] != ' ')
         j++;  
     return line.substr(j);                               
 }
@@ -499,11 +498,11 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     return;
 }
  Stack<Frame> st;
-Token tk[MAX_TOKENS];
-Token hd[MAX_TOKENS];
-string s;
-fseek(f, (long)mainOffset, SEEK_SET);
-readResolveRecord(f, s);
+  Token tk[MAX_TOKENS];
+  Token hd[MAX_TOKENS];
+  string s;
+  fseek(f, (long)mainOffset, SEEK_SET);
+ readResolveRecord(f, s);
 Frame m;
 m.func_name = "main";
 m.argc = 0;
@@ -594,9 +593,57 @@ fclose(f);
     // execute line by line, and according to the keyword perform action
 
 // PASS 0x3: SERIALIZE TIMELINE
+void wstr(FILE* f, const string& s)
+{
+    int32_t n = s.size();
+    fwrite(&n, 4, 1, f);
+    fwrite(s.c_str(), 1, n, f);
+}
+void wvar(FILE* f, const Variable& v)
+{
+    wstr(f, v.name);
+    fwrite(&v.value, 4, 1, f);
+}
+void wframe(FILE* f, const Frame& fr)
+{
+    wstr(f, fr.func_name);
+    fwrite(&fr.argc, 4, 1, f);
+    for (int32_t i = 0; i < fr.argc; i++)
+        wvar(f, fr.argv[i]);
+    fwrite(&fr.returnLine, 4, 1, f);
+    fwrite(&fr.localCount, 4, 1, f);
+    for (int32_t i = 0; i < fr.localCount; i++)
+        wvar(f, fr.locals[i]);
+}
 
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
+    FILE* f = fopen(tdbgPath, "wb");
+    if (!f)
+        return;
+    TTDBHeader h;
+    h.magic[0] = 'T';
+    h.magic[1] = 'T';
+    h.magic[2] = 'D';
+    h.magic[3] = 'B';
+    h.version = 1;
+    h.stepCount = timeline.getStepCount();
+    h.indexOffset = 0;
+    writeHeader(f, h);
+    vector<int64_t> idx;
+    for (TimelineNode* k = timeline.begin(); k != nullptr; k = k->next) {
+        idx.push_back(ftell(f));
+        Snapshot* s = k->data;
+        fwrite(&s->stackDepth, 4, 1, f);
+        for (int32_t i = 0; i < s->stackDepth; i++)
+            wframe(f, s->callStack[i]);
+    }
+    h.indexOffset = ftell(f);
+    for (int32_t i = 0; i < (int32_t)idx.size(); i++)
+        fwrite(&idx[i], 8, 1, f);
+    fseek(f, 0, SEEK_SET);
+    writeHeader(f, h);
+    fclose(f);
     // placeholder for header
     // index array of the size of stepcount from the timeline
     // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
@@ -609,12 +656,15 @@ int32_t main()
 
     if (!validateProgram("source.bin"))
     {
-        // send an error response instead of a .tdbg file
+        cout << "Errror";
         return 1;
     }
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-
+    if (mainOffset < 0)
+    {
+        cout << "Errror";        return 1;
+    }
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
 
