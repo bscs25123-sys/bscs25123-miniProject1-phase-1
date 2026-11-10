@@ -1,17 +1,3 @@
-// ======================= TIME-TRAVEL DEBUGGER - CLIENT TEMPLATE =======================
-
-// The client never talks to the server directly. It only talks to the load balancer.
-// The load balancer wakes the server up if it is down, so the client does not care.
-// The first "start" may just take a bit longer.
-//
-// The network is used ONLY by "start". After the .tdbg file is downloaded,
-// next / prv / jmp read that file on the local disk. They never contact the load balancer.
-//
-// How the pieces fit together:
-//   main loop -> readCommand -> runCommand
-//   start -> cmdStart()  -> requestDebugFile() (Part A) -> openTdbg() (Part B) -> shows step 1
-//   next, prv, jmp -> moveBy() (Part D) -> readSnapshotAt() (Part B) -> printSnapshot() (Part E)
-
 #include <iostream>
 #include <string>
 #include <cstdint>
@@ -28,23 +14,15 @@
 #include <netdb.h>
 #include "helper.h"
 using namespace std;
-
-// ---- Constants ----
 const char *PROGRAM_NAME = "ttdb";
 const char *PROMPT = "ttdb> ";
-const int IO_BUFFER_SIZE = 64 * 1024;     // fixed buffer for streaming files to and from the socket
-const char *TDBG_FILE = "ttdb_last.tdbg"; // where the downloaded .tdbg is saved
-const int MAX_JUMP = 1000000000;          // biggest n accepted by jmp
+const int IO_BUFFER_SIZE = 64 * 1024;
+const char *TDBG_FILE = "ttdb_last.tdbg";
+const int MAX_JUMP = 1000000000;
 string LB_HOST = "127.0.0.0";
 int LB_PORT = 5000;
-
-// These two must be the same as in Phase 1
-
 const int MAX_VARS_PER_FRAME = 16;
 const int MAX_STACK_DEPTH = 64;
-
-
-// ---- Structs (same as Phase 1, so the file can be read back exactly as it was written) ----
 struct Variable
 {
     string name;
@@ -64,15 +42,13 @@ struct Snapshot
     Frame callStack[MAX_STACK_DEPTH];
     int32_t stackDepth;
 };
-struct TTDBHeader 
+struct TTDBHeader
 {
-    char magic[4]; // "TTDB"
+    char magic[4];
     int32_t version;
     int32_t stepCount;
     int64_t indexOffset;
 };
-
-// ---- Structs only the client needs ----
 struct TdbgReader
 {
     ssize_t file_index;
@@ -81,19 +57,15 @@ struct TdbgReader
 };
 struct DebugSession
 {
-    int active_flag;     // false until a "start" has worked
-    TdbgReader reader;   // the .tdbg file stays open for the whole session
-    int64_t currentStep; 
+    int active_flag;
+    TdbgReader reader;
+    int64_t currentStep;
 };
-
 // =============================================================================================
 // PART A: TALKING TO THE LOAD BALANCER
 // =============================================================================================
-
 bool recvAll(int sock, char *buf, size_t n)
 {
-    // recv() can return fewer bytes than asked for, so keep calling it until exactly n bytes are read.
-    // Return false if the connection closes or fails before n bytes arrive.
     size_t gotSoFar = 0;
     while (gotSoFar < n)
     {
@@ -108,8 +80,6 @@ bool recvAll(int sock, char *buf, size_t n)
 }
 bool sendAll(int sock, const char *buf, size_t n)
 {
-    // send() can send fewer bytes than asked for, so keep calling it until all n bytes are sent.
-    // Use the flag MSG_NOSIGNAL. Return false if the connection fails.
     size_t pushed = 0;
     while (pushed < n)
     {
@@ -122,21 +92,16 @@ bool sendAll(int sock, const char *buf, size_t n)
     }
     return true;
 }
-
 int connectToHost(const char *host, int port)
 {
-    // Create a TCP socket and connect it to host:port.
-    // Return the socket, or -1 if the connection fails.
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-
     string portText = to_string(port);
     struct addrinfo *found = nullptr;
     if (getaddrinfo(host, portText.c_str(), &hints, &found) != 0 || found == nullptr)
         return -1;
-
     int channel = -1;
     for (struct addrinfo *cand = found; cand != nullptr; cand = cand->ai_next)
     {
@@ -153,17 +118,12 @@ int connectToHost(const char *host, int port)
 }
 bool uploadSource(int sock, const char *sourcePath)
 {
-    // have to do checksum and then send
-    // When the file is finished, call shutdown(sock, SHUT_WR). This is how the server knows the string is complete.
-    // Return false if the file cannot be opened or any send fails.
     FILE *srcFile = fopen(sourcePath, "rb");
     if (srcFile == nullptr)
         return false;
-
     vector<char> chunk(IO_BUFFER_SIZE);
     uint32_t runningCrc = 0;
     bool allGood = true;
-
     while (true)
     {
         size_t got = fread(chunk.data(), 1, chunk.size(), srcFile);
@@ -186,31 +146,22 @@ bool uploadSource(int sock, const char *sourcePath)
     fclose(srcFile);
     if (!allGood)
         return false;
-
     char crcTail[4];
     crcToBytes(runningCrc, crcTail);
     if (!sendAll(sock, crcTail, 4))
         return false;
-
     shutdown(sock, SHUT_WR);
     return true;
 }
 bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
 {
-    // Reply on the wire: [status][payload][CRC-32]. The CRC covers the status byte too.
-    // Feed every received byte (status included) to a TrailerChecker.
-    // Status 1: collect the payload into outError. Status 0: write the payload to the file.
-    // At the end call verify(). If it fails, delete the file, set outError to
-    // "checksum mismatch, response corrupted" and return false.
     TrailerChecker guard;
     vector<char> incoming(IO_BUFFER_SIZE);
     vector<char> released(IO_BUFFER_SIZE + 4);
-
     FILE *landing = nullptr;
     bool statusSeen = false;
     int statusByte = -1;
     outError.clear();
-
     auto bail = [&](const string &why) -> bool {
         if (landing != nullptr)
         {
@@ -221,7 +172,6 @@ bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
         outError = why;
         return false;
     };
-
     while (true)
     {
         ssize_t gotNow = recv(sock, incoming.data(), incoming.size(), 0);
@@ -231,7 +181,6 @@ bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
             return bail("connection lost or timed out while receiving the response");
         if (gotNow == 0)
             break;
-
         size_t ready = guard.feed(incoming.data(), (size_t)gotNow, released.data());
         size_t from = 0;
         if (ready > 0 && !statusSeen)
@@ -264,17 +213,14 @@ bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
             }
         }
     }
-
     if (!statusSeen || !guard.verify())
         return bail("checksum mismatch, response corrupted");
-
     if (statusByte == 1)
     {
         if (outError.empty())
             outError = "server reported an error";
         return false;
     }
-
     if (fclose(landing) != 0)
     {
         landing = nullptr;
@@ -283,7 +229,6 @@ bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
     landing = nullptr;
     return true;
 }
-
 bool requestDebugFile(const char *host, int port, const char *sourcePath,
                       const char *outTdbgPath, string &outError)
 {
@@ -294,7 +239,6 @@ bool requestDebugFile(const char *host, int port, const char *sourcePath,
         return false;
     }
     setRecvTimeout(channel, CLIENT_TIMEOUT_SEC);
-
     if (!uploadSource(channel, sourcePath))
     {
         close(channel);
@@ -305,14 +249,9 @@ bool requestDebugFile(const char *host, int port, const char *sourcePath,
     close(channel);
     return okay;
 }
-
 // =============================================================================================
 // PART B: READING THE .tdbg FILE
-// File layout (written by Phase 1):
-//   header | snapshot 0 | snapshot 1 | ... | index (one 8 byte offset per snapshot)
-// The index lets us jump straight to any step without reading the steps before it.
 // =============================================================================================
-
 static bool readFully(int fd, void *dest, size_t amount, int64_t where)
 {
     char *cursor = (char *)dest;
@@ -350,13 +289,11 @@ static bool takeVariable(int fd, int64_t &where, Variable &out)
 {
     return takeText(fd, where, out.name) && takeInt(fd, where, out.value);
 }
-
 bool openTdbg(const char *path, TdbgReader &r)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return false;
-
     TTDBHeader head;
     if (!readFully(fd, &head, sizeof(head), 0) || memcmp(head.magic, "TTDB", 4) != 0 ||
         head.stepCount < 1 || head.indexOffset < (int64_t)sizeof(head))
@@ -364,7 +301,6 @@ bool openTdbg(const char *path, TdbgReader &r)
         close(fd);
         return false;
     }
-
     vector<int64_t> table((size_t)head.stepCount);
     if (!readFully(fd, table.data(), table.size() * sizeof(int64_t), head.indexOffset))
     {
@@ -379,7 +315,6 @@ bool openTdbg(const char *path, TdbgReader &r)
             return false;
         }
     }
-
     r.file_index = fd;
     r.header = head;
     r.index = table;
@@ -387,7 +322,6 @@ bool openTdbg(const char *path, TdbgReader &r)
 }
 void closeTdbg(TdbgReader &r)
 {
-    // Free r.index and close the file.
     vector<int64_t>().swap(r.index);
     if (r.file_index >= 0)
         close((int)r.file_index);
@@ -397,14 +331,11 @@ Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
 {
     if (r.file_index < 0 || step < 0 || (size_t)step >= r.index.size())
         return nullptr;
-
     int fd = (int)r.file_index;
     int64_t where = r.index[(size_t)step];
     Snapshot *shot = new Snapshot();
-
     bool good = takeInt(fd, where, shot->stackDepth) &&
                 shot->stackDepth >= 0 && shot->stackDepth <= MAX_STACK_DEPTH;
-
     for (int32_t i = 0; good && i < shot->stackDepth; i++)
     {
         Frame &fr = shot->callStack[i];
@@ -417,7 +348,6 @@ Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
         for (int32_t l = 0; good && l < fr.localCount; l++)
             good = takeVariable(fd, where, fr.locals[l]);
     }
-
     if (!good)
     {
         delete shot;
@@ -425,12 +355,9 @@ Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
     }
     return shot;
 }
-
 // =============================================================================================
 // PART C: THE SESSION IN MEMORY
-// There is one DebugSession variable, created in main() and passed to every command by reference.
 // =============================================================================================
-
 void initSession(DebugSession &s)
 {
     s.active_flag = 0;
@@ -441,23 +368,16 @@ void initSession(DebugSession &s)
 }
 void closeSession(DebugSession &s)
 {
-    // If active, call closeTdbg(s.reader). Then set active = false.
-    // Called when the user types quit and when the input ends.
     if (s.active_flag)
         closeTdbg(s.reader);
     s.active_flag = 0;
 }
-
 // =============================================================================================
 // PART D: THE COMMANDS
 // =============================================================================================
-
-void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot &s); // defined in Part E
-
+void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot &s);
 bool showCurrent(DebugSession &s)
 {
-    // Read the snapshot at s.currentStep, call printSnapshot, delete the snapshot.
-    // If readSnapshotAt returns nullptr, print "damaged .tdbg file" and return false.
     Snapshot *shot = readSnapshotAt(s.reader, (int32_t)s.currentStep);
     if (shot == nullptr)
     {
@@ -493,23 +413,13 @@ bool moveBy(DebugSession &s, int32_t delta)
 }
 bool cmdStart(DebugSession &s, const string &sourcePath)
 {
-    // 1. requestDebugFile with host and port, saving to TDBG_FILE.
-    // 2. If it fails, print the error text and return false. Keep the old session as it was.
-    // 3. Open the new file with openTdbg into a NEW local TdbgReader.
-    //    If that fails, print "server sent a damaged .tdbg file", keep the old session, return false.
-    // 4. Only now close the old reader (if s.active), then put the new reader into s,
-    //    set s.currentStep = 0 and s.active = true.
-    // 5. Show step 1 with showCurrent(s).
-
     string tempName = string(TDBG_FILE) + ".part";
-
     string failText;
     if (!requestDebugFile(LB_HOST.c_str(), LB_PORT, sourcePath.c_str(), tempName.c_str(), failText))
     {
         cout << failText << endl;
         return false;
     }
-
     TdbgReader fresh;
     fresh.file_index = -1;
     if (!openTdbg(tempName.c_str(), fresh))
@@ -518,27 +428,22 @@ bool cmdStart(DebugSession &s, const string &sourcePath)
         cout << "server sent a damaged .tdbg file" << endl;
         return false;
     }
-
     if (rename(tempName.c_str(), TDBG_FILE) != 0)
         remove(tempName.c_str());
-
     if (s.active_flag)
         closeTdbg(s.reader);
     s.reader = fresh;
     s.currentStep = 0;
     s.active_flag = 1;
-
     return showCurrent(s);
 }
 bool cmdNext(DebugSession &s) { return moveBy(s, 1); }
 bool cmdPrv(DebugSession &s) { return moveBy(s, -1); }
 bool cmdJmpNext(DebugSession &s, int32_t n) { return moveBy(s, n); }
 bool cmdJmpPrv(DebugSession &s, int32_t n) { return moveBy(s, -n); }
-
 // =============================================================================================
 // PART E: PRINTING
 // =============================================================================================
-
 static void printVariableList(const char *label, const Variable *list, int32_t howMany)
 {
     cout << "    " << label << ": ";
@@ -552,7 +457,6 @@ static void printVariableList(const char *label, const Variable *list, int32_t h
     }
     cout << endl;
 }
-
 void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot &s)
 {
     cout << "=== Step " << step << " of " << totalSteps << " ===" << endl;
@@ -569,7 +473,6 @@ void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot &s)
 }
 void printHelp()
 {
-    // Print the commands
     cout << "Commands:" << endl;
     cout << "  start <source file>    send the source, download the trace, show step 1" << endl;
     cout << "  next                   go one step forward" << endl;
@@ -579,24 +482,11 @@ void printHelp()
     cout << "  help                   show this text" << endl;
     cout << "  quit | exit            leave the debugger" << endl;
 }
-
 // =============================================================================================
 // PART F: THE INFINITE LOOP
 // =============================================================================================
-
 bool runCommand(DebugSession &s, const string &line, bool &quitRequested)
 {
-    // 1. Split the line into words.
-    // 2. If the first word is "ttdb", drop it.
-    // 3. Match the first word:
-    //      start      -> needs a path after it, then cmdStart
-    //      next       -> no more words, then cmdNext
-    //      prv        -> no more words, then cmdPrv
-    //      jmp        -> second word "next" or "prv", third word a positive number ,
-    //                    then cmdJmpNext or cmdJmpPrv
-    //      help       -> printHelp
-    //      quit, exit -> set quitRequested = true
-    // 4. For anything else, or a wrong number of words, print "unknown command" and the help text, and return false.
     vector<string> tokens;
     {
         istringstream splitter(line);
@@ -613,7 +503,6 @@ bool runCommand(DebugSession &s, const string &line, bool &quitRequested)
         printHelp();
         return true;
     }
-
     const string &verb = tokens[0];
     if (verb == "start" && tokens.size() == 2)
         return cmdStart(s, tokens[1]);
@@ -643,26 +532,21 @@ bool runCommand(DebugSession &s, const string &line, bool &quitRequested)
         quitRequested = true;
         return true;
     }
-
     cout << "unknown command" << endl;
     printHelp();
     return false;
 }
 int main(int argc, char *argv[])
 {
-    // you get string LB_HOST and int LB_PORT = 0 in arguments of this main function. 
     if (argc >= 2)
         LB_HOST = argv[1];
     if (argc >= 3)
         LB_PORT = atoi(argv[2]);
-
     signal(SIGPIPE, SIG_IGN);
-
     DebugSession session;
     initSession(session);
     cout << "Welcome to the time-travel debugger (" << PROGRAM_NAME << ")" << endl;
     printHelp();
-
     bool quitRequested = false;
     while (true)
     {
@@ -674,7 +558,6 @@ int main(int argc, char *argv[])
             break;
         runCommand(session, typed, quitRequested);
     }
-
     closeSession(session);
     return 0;
 }
